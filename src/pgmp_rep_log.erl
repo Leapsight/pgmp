@@ -77,8 +77,7 @@
 -callback truncate(truncate_collection_req()) -> request_id_collection().
 -callback update(crud_collection_req()) -> request_id_collection().
 
-
 slot_name(Publication) ->
     lists:join(
       "_",
-      [pgmp_config:replication(logical, slot_prefix), Publication]).
+      [string:replace(pgmp_config:replication(logical, slot_prefix), "-", "_", all), Publication]).
