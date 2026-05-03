@@ -136,6 +136,14 @@ handle_event(internal,
     {keep_state_and_data, nei({process, TM})};
 
 handle_event(internal,
+             {recv, {notice_response, _} = TM},
+             _,
+             _) ->
+    {Tag, Message} = pgmp_error_notice_fields:map(TM),
+    ?LOG_WARNING(#{tag => Tag, message => Message}),
+    keep_state_and_data;
+
+handle_event(internal,
              {process, {Tag, _} = Reply},
              _,
              #{from := _, replies := Rs} = Data) when Tag == error_response;
