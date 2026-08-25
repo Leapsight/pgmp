@@ -269,7 +269,7 @@ handle_event({call, Stream}, {snapshot, #{id := Id}}, _, Data) ->
       nei(sync_publication_tables)]};
 
 handle_event({call, Stream}, {lsn, #{}}, _, _) ->
-    {keep_state_and_data, {reply, Stream, <<"0/0">>}};
+    {keep_state_and_data, {reply, Stream, {ok, pgmp_lsn:decode(<<"0/0">>)}}};
 
 handle_event(info, {'DOWN', _, process, _, shutdown = Reason}, _, _) ->
     {stop, Reason};
