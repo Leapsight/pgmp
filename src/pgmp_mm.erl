@@ -37,11 +37,13 @@ start_link(Arg) ->
     gen_statem:start_link(?MODULE, [Arg], envy_gen:options(?MODULE)).
 
 
-recv(#{tag := Tag, message := Message} = Arg) ->
+%% A whole packet of framed, but not yet demarshalled, messages.
+%%
+recv(#{messages := Messages} = Arg) ->
     send_request(
       maps:without(
-        [tag, message],
-        maybe_label(Arg#{request => {?FUNCTION_NAME, {Tag, Message}}}))).
+        [messages],
+        maybe_label(Arg#{request => {?FUNCTION_NAME, Messages}}))).
 
 
 query(Arg) ->

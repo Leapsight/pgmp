@@ -21,9 +21,9 @@
 -export([terminate/3]).
 -import(pgmp_codec, [marshal/2]).
 -import(pgmp_codec, [size_inclusive/1]).
--import(pgmp_data_row, [decode/3]).
 -import(pgmp_mm_common, [actions/3]).
 -import(pgmp_mm_common, [data/3]).
+-import(pgmp_mm_common, [decoded/4]).
 -import(pgmp_mm_common, [field_names/1]).
 -import(pgmp_statem, [nei/1]).
 -include_lib("kernel/include/logger.hrl").
@@ -238,18 +238,18 @@ handle_event(internal,
            #{tag => Tag}})]};
 
 handle_event(internal,
-             {recv = EventName, {data_row = Tag, Columns}},
+             {recv = EventName, {data_rows, Rows}},
              execute,
              #{config := Config,
                parameters := Parameters,
                types := Types}) ->
+    Decoded = decoded(Parameters, Types, Rows, pgmp_types:cache(Config)),
     {keep_state_and_data,
-     [nei({telemetry, EventName, #{count => 1}, #{tag => Tag}}),
-      nei({process,
-           {Tag,
-            decode(Parameters,
-                   lists:zip(Types, Columns),
-                   pgmp_types:cache(Config))}})]};
+     [nei({telemetry,
+           EventName,
+           #{count => length(Decoded)},
+           #{tag => data_row}}),
+      nei({process_all, Decoded})]};
 
 handle_event(internal,
              {recv = EventName, {parse_complete = Tag, _}},
@@ -392,18 +392,22 @@ handle_event(internal,
       nei(sync)]};
 
 handle_event(internal,
-             {recv = EventName, {data_row = Tag, Columns}},
+             {recv = EventName, {data_rows, Rows}},
              execute,
              #{args := [Portal, _],
                config := Config,
                parameters := Parameters,
                cache := Cache} = Data) ->
     [{_, Types}] = ets:lookup(Cache, {row_description, Portal}),
+    Decoded = decoded(Parameters, Types, Rows, pgmp_types:cache(Config)),
     {keep_state,
      Data#{types => Types},
-     [nei({telemetry, EventName, #{count => 1}, #{tag => Tag}}),
+     [nei({telemetry,
+           EventName,
+           #{count => length(Decoded)},
+           #{tag => data_row}}),
       nei({process, {row_description, field_names(Types)}}),
-      nei({process, {Tag, decode(Parameters, lists:zip(Types, Columns), pgmp_types:cache(Config))}})]};
+      nei({process_all, Decoded})]};
 
 handle_event(internal,
              {recv = EventName,

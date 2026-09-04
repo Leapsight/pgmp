@@ -213,14 +213,8 @@ handle_event(info,
 handle_event(info,
              {tcp, Socket, Received},
              _,
-             #{socket := Socket, partial := Partial} = Data) ->
-    {keep_state,
-     Data#{partial := <<>>},
-     [nei({telemetry,
-           recv,
-           #{bytes => iolist_size(Received)},
-           #{}}),
-      nei({recv, iolist_to_binary([Partial, Received])})]};
+             #{socket := Socket} = Data) ->
+    recv(Received, Data);
 
 handle_event(info,
              {ssl_error, TLS, {tls_alert, _} = Reason},
@@ -237,14 +231,8 @@ handle_event(info,
 handle_event(info,
              {ssl, TLS, Received},
              _,
-             #{tls := TLS, partial := Partial} = Data) ->
-    {keep_state,
-     Data#{partial := <<>>},
-     [nei({telemetry,
-           recv,
-           #{bytes => iolist_size(Received)},
-           #{}}),
-      nei({recv, iolist_to_binary([Partial, Received])})]};
+             #{tls := TLS} = Data) ->
+    recv(Received, Data);
 
 handle_event(info, {'DOWN', _, process, Peer, noproc}, _, #{peer := Peer}) ->
     stop;
@@ -262,54 +250,6 @@ handle_event(info, Msg, _, #{requests := Existing} = Data) ->
 
 handle_event(internal, {response, #{label := pgmp_mm, reply :=  ok}}, _, _) ->
     keep_state_and_data;
-
-handle_event(internal,
-             {recv,
-              <<Tag:1/signed-bytes,
-                Length:32/signed,
-                Message:(Length - 4)/bytes, Remainder/bytes>>},
-             _,
-             _) ->
-    {keep_state_and_data,
-     [nei({tag_msg, Tag, Message}), nei({recv, Remainder})]};
-
-handle_event(internal,
-             {recv, Message},
-             _,
-             #{peer := Peer, requests := Requests} = Data)
-  when Message == <<"S">>;
-       Message == <<"N">> ->
-    {keep_state,
-     Data#{requests := pgmp_mm:recv(
-                         #{server_ref => Peer,
-                           tag => ssl,
-                           message => Message,
-                           requests => Requests})},
-     nei({telemetry,
-          ssl,
-          #{count => 1, bytes => iolist_size(Message)},
-          #{tag => ssl}})};
-
-handle_event(internal, {recv, <<>>}, _, _) ->
-    keep_state_and_data;
-
-handle_event(internal, {recv, Partial}, _, #{partial := <<>>} = Data) ->
-    {keep_state, Data#{partial := Partial}};
-
-handle_event(internal,
-             {tag_msg = EventName, Tag, Message},
-             _,
-             #{peer := Peer, requests := Requests} = Data) ->
-    {keep_state,
-     Data#{requests := pgmp_mm:recv(
-                         #{server_ref => Peer,
-                           tag => pgmp_message_tags:name(backend, Tag),
-                           message => Message,
-                           requests => Requests})},
-     nei({telemetry,
-          EventName,
-          #{count => 1, bytes => iolist_size(Message)},
-          #{tag => pgmp_message_tags:name(backend, Tag)}})};
 
 handle_event(internal,
              connect,
@@ -346,6 +286,98 @@ handle_event(internal,
 
 handle_event(state_timeout, {backoff, _}, limbo, _) ->
     stop.
+
+
+%% The reply to an SSLRequest is a single byte, sent on its own ahead
+%% of any framed message.
+%%
+recv(Byte,
+     #{peer := Peer, partial := <<>>, requests := Requests} = Data)
+  when Byte == <<"S">>;
+       Byte == <<"N">> ->
+    {keep_state,
+     Data#{requests := pgmp_mm:recv(
+                         #{server_ref => Peer,
+                           messages => [{ssl, Byte}],
+                           requests => Requests})},
+     nei({telemetry,
+          ssl,
+          #{count => 1, bytes => 1},
+          #{tag => ssl}})};
+
+%% Frame the whole packet in a single pass, off the gen_statem loop,
+%% and hand the message machine one request for all of it. A result
+%% set of n rows costs one transition and one request here, rather
+%% than one of each per row.
+%%
+recv(Received,
+     #{peer := Peer, partial := Partial, requests := Requests} = Data) ->
+    Recv = nei({telemetry, recv, #{bytes => iolist_size(Received)}, #{}}),
+
+    case frame(buffer(Partial, Received), []) of
+        {[], Remainder} ->
+            {keep_state, Data#{partial := Remainder}, Recv};
+
+        {Messages, Remainder} ->
+            {keep_state,
+             Data#{partial := Remainder,
+                   requests := pgmp_mm:recv(
+                                 #{server_ref => Peer,
+                                   messages => Messages,
+                                   requests => Requests})},
+             [Recv | tag_msg(Messages)]}
+    end.
+
+
+%% iolist_to_binary/1 returns a binary argument unchanged, so an empty
+%% partial costs nothing, while [Partial, Received] copies.
+%%
+buffer(<<>>, Received) ->
+    iolist_to_binary(Received);
+
+buffer(Partial, Received) ->
+    iolist_to_binary([Partial, Received]).
+
+
+frame(<<Tag:1/signed-bytes,
+        Length:32/signed,
+        Message:(Length - 4)/bytes,
+        Remainder/bytes>>,
+      A) ->
+    ?FUNCTION_NAME(
+       Remainder,
+       [{pgmp_message_tags:name(backend, Tag), Message} | A]);
+
+frame(Partial, A) ->
+    {lists:reverse(A), Partial}.
+
+
+%% One telemetry event per distinct tag in the packet, rather than one
+%% per message. The measurements of [pgmp, socket, tag_msg] are
+%% counters, so a consumer that sums them sees the same totals.
+%%
+tag_msg(Messages) ->
+    maps:fold(
+      fun
+          (Tag, Measurements, A) ->
+              [nei({telemetry, tag_msg, Measurements, #{tag => Tag}}) | A]
+      end,
+      [],
+      lists:foldl(
+        fun
+            ({Tag, Message}, A) ->
+                maps:update_with(
+                  Tag,
+                  fun
+                      (#{count := Count, bytes := Bytes}) ->
+                          #{count => Count + 1,
+                            bytes => Bytes + byte_size(Message)}
+                  end,
+                  #{count => 1, bytes => byte_size(Message)},
+                  A)
+        end,
+        #{},
+        Messages)).
 
 
 terminate(_Reason, _State, #{socket := Socket}) ->

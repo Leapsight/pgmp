@@ -21,9 +21,9 @@
 -export([terminate/3]).
 -import(pgmp_codec, [marshal/2]).
 -import(pgmp_codec, [size_inclusive/1]).
--import(pgmp_data_row, [decode/3]).
 -import(pgmp_mm_common, [actions/3]).
 -import(pgmp_mm_common, [data/3]).
+-import(pgmp_mm_common, [decoded/4]).
 -import(pgmp_mm_common, [field_names/1]).
 -import(pgmp_statem, [nei/1]).
 -include("pgmp_types.hrl").
@@ -228,37 +228,35 @@ handle_event(internal,
       nei({process, {Tag, field_names(Types)}})]};
 
 handle_event(internal,
-             {recv = EventName, {data_row = Tag, Columns}},
+             {recv = EventName, {data_rows, Rows}},
              query,
              #{parameters := Parameters,
                config := Config,
                types_ready := true,
                types := Types}) ->
+    Decoded = decoded(Parameters, Types, Rows, pgmp_types:cache(Config)),
     {keep_state_and_data,
      [nei({telemetry,
            EventName,
-           #{count => 1},
-           #{tag => Tag, types_ready => true}}),
+           #{count => length(Decoded)},
+           #{tag => data_row, types_ready => true}}),
 
-      nei({process,
-           {Tag,
-            decode(Parameters,
-                   lists:zip(Types, Columns),
-                   pgmp_types:cache(Config))}})]};
+      nei({process_all, Decoded})]};
 
 handle_event(internal,
-             {recv = EventName, {data_row = Tag, Columns}},
+             {recv = EventName, {data_rows, Rows}},
              query,
              #{parameters := Parameters,
                types_ready := false,
                types := Types}) ->
+    Decoded = decoded(Parameters, Types, Rows, #{}),
     {keep_state_and_data,
      [nei({telemetry,
            EventName,
-           #{count => 1},
-           #{tag => Tag, types_ready => false}}),
+           #{count => length(Decoded)},
+           #{tag => data_row, types_ready => false}}),
 
-      nei({process, {Tag, decode(Parameters, lists:zip(Types, Columns), #{})}})]};
+      nei({process_all, Decoded})]};
 
 handle_event(internal,
              complete,

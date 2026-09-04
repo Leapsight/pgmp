@@ -18,6 +18,7 @@
 
 -export([actions/3]).
 -export([data/3]).
+-export([decoded/4]).
 -export([field_names/1]).
 -export([handle_event/4]).
 -export([terminate/3]).
@@ -68,9 +69,8 @@ handle_event(internal,
              #{types_ready := false} = Data) ->
     {keep_state, Data#{types_ready := true}};
 
-handle_event({call, From}, {recv, {Tag, _} = TM}, _, _) ->
-    {Decoded, <<>>} = demarshal(TM),
-    {keep_state_and_data, [{reply, From, ok}, nei({recv, {Tag, Decoded}})]};
+handle_event({call, From}, {recv, Messages}, _, _) ->
+    {keep_state_and_data, [{reply, From, ok} | recv(Messages)]};
 
 handle_event(info, Msg, _, #{requests := Existing} = Data) ->
     case gen_statem:check_response(Msg, Existing, true) of
@@ -153,6 +153,12 @@ handle_event(internal,
 
 handle_event(internal, {process, Reply}, _, #{from := _, replies := Rs} = Data) ->
     {keep_state, Data#{replies := [Reply | Rs]}};
+
+handle_event(internal,
+             {process_all, Replies},
+             _,
+             #{from := _, replies := Rs} = Data) ->
+    {keep_state, Data#{replies := lists:reverse(Replies, Rs)}};
 
 handle_event(internal,
              types_when_ready,
@@ -263,6 +269,9 @@ handle_event(internal,
              args(EventName, Metadata))),
     keep_state_and_data;
 
+handle_event(internal, {recv, {data_rows, Rows}}, _, _) ->
+    {keep_state_and_data, [nei({recv, {data_row, Row}}) || Row <- Rows]};
+
 handle_event(internal, {recv, {error_response, _} = TM}, _, Data) ->
     {Tag, Message} = pgmp_error_notice_fields:map(TM),
     ?LOG_WARNING(#{tag => Tag, message  => Message}),
@@ -290,6 +299,42 @@ handle_event(internal, gc_unnamed_portal, _, #{cache := Cache}) ->
 
 handle_event(state_timeout, {backoff, _}, limbo, _) ->
     stop.
+
+
+%% Demarshal a packet of framed messages in a single pass, off the
+%% gen_statem loop, coalescing each run of data rows into one event: a
+%% result set of n rows costs one transition rather than n.
+%%
+recv([{data_row, _} | _] = Messages) ->
+    {Rows, Remainder} = data_rows(Messages, []),
+    [nei({recv, {data_rows, Rows}}) | ?FUNCTION_NAME(Remainder)];
+
+recv([{Tag, _} = Message | T]) ->
+    {Decoded, <<>>} = demarshal(Message),
+    [nei({recv, {Tag, Decoded}}) | ?FUNCTION_NAME(T)];
+
+recv([]) ->
+    [].
+
+
+data_rows([{data_row, _} = Message | T], A) ->
+    {Decoded, <<>>} = demarshal(Message),
+    ?FUNCTION_NAME(T, [Decoded | A]);
+
+data_rows(Remainder, A) ->
+    {lists:reverse(A), Remainder}.
+
+
+%% Decode a run of data rows, with the type cache resolved once for
+%% the run rather than once per row.
+%%
+-spec decoded(map(), [map()], [[binary() | null]], pgmp_types:cache()) ->
+          [{data_row, [any()]}].
+
+decoded(Parameters, Types, Rows, Cache) ->
+    [{data_row,
+      pgmp_data_row:decode(Parameters, lists:zip(Types, Columns), Cache)}
+     || Columns <- Rows].
 
 
 args([bind | _],
